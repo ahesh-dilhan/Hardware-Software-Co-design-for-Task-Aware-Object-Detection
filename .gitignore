@@ -1,0 +1,9 @@
+# HLS generated outputs
+dcse_top/dcse_top/
+*.log
+*.jou
+*.pb
+*.str
+.Xil/
+_ide/
+*.ip_user_files/
