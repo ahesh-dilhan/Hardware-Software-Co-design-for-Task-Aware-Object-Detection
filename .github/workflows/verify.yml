@@ -19,3 +19,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes iverilog
       - name: Run model and RTL tests
         run: make test
+
+  xc7-synthesis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install open synthesis tool
+        run: sudo apt-get update && sudo apt-get install --yes yosys
+      - name: Map standalone RTL to Xilinx 7-series primitives
+        run: make synth-xc7

@@ -1,0 +1,6 @@
+read_verilog -sv -DSYNTHESIS rtl/systolic/systolic_gemm.sv
+hierarchy -check -top systolic_gemm
+synth_xilinx -family xc7 -noiopad -top systolic_gemm
+check
+tee -o build/yosys/systolic_n16_stat.txt stat -tech xilinx
+tee -o build/yosys/systolic_n16_stat.json stat -json

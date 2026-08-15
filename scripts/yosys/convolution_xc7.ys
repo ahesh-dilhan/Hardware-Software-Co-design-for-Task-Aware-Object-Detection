@@ -1,0 +1,6 @@
+read_verilog -sv -DSYNTHESIS rtl/convolution/signed_int8_conv3x3.sv
+hierarchy -check -top signed_int8_conv3x3
+synth_xilinx -family xc7 -noiopad -top signed_int8_conv3x3
+check
+tee -o build/yosys/convolution_stat.txt stat -tech xilinx
+tee -o build/yosys/convolution_stat.json stat -json

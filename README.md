@@ -2,175 +2,231 @@
 
 [![verify](https://github.com/ahesh-dilhan/Hardware-Software-Co-design-for-Task-Aware-Object-Detection/actions/workflows/verify.yml/badge.svg)](https://github.com/ahesh-dilhan/Hardware-Software-Co-design-for-Task-Aware-Object-Detection/actions/workflows/verify.yml)
 
-This repository explores the accelerator side of a hardware/software
-co-design for task-aware object detection. The current prototype is a
-fixed-size, 16-output-channel INT8 MAC tile with an optional identity-residual
-primitive. It is written in Xilinx HLS C++ and targets the Kintex-7
-device used by the Digilent Genesys 2 board.
+This repository explores accelerator building blocks for a task-aware
+object-detection system. It now contains several deliberately separate
+implementation paths: an HLS pointwise-projection kernel, standalone RTL
+arithmetic primitives, and a generic APB3 control boundary with a portable C
+register driver. One narrow demo wrapper connects APB start/status control to
+the systolic core while keeping matrices on direct packed ports. Each path has
+its own test evidence; none is presented as an integrated detector or complete
+processor/FPGA system.
 
-The most important design rule in this repository is **evidence before
-claims**. The HLS C testbench, portable Python model, and standalone RTL slice
-have separate checks; passing one is not presented as equivalence proof for the
-others. Timing, latency, and utilization are reported only from completed
-synthesis reports.
+The central engineering rule is **evidence before claims**. Simulation of one
+block is not equivalence proof for another, structural synthesis is not
+place-and-route timing closure, and an APB peripheral is not a VEGA SoC
+integration.
 
-This is an accelerator-kernel prototype, not an end-to-end object detector. It
-does not yet contain a YOLO graph or trained weights, spatial convolution,
-activation/requantization, a detection head, or non-maximum suppression.
+## Scope and current status
 
-## What is implemented
+| Artifact | Implemented behavior | Current evidence | Integration status |
+| --- | --- | --- | --- |
+| HLS kernel | Signed INT8 pointwise channel projection, 16 outputs, INT32 accumulation, INT16 bias, optional fused identity residual, and direct output write | Python model, Vitis HLS 2025.2 C simulation, and bounded compiler-scale comparison | Independent kernel; hardware transformation did not finish and generated RTL is not committed |
+| `int8_mac_tile_16x16` | One 16-input x 16-output parallel dot-product transaction with bias/residual and an elastic output | Self-checking RTL simulation | Standalone; **not systolic** and not equivalent to the full HLS kernel |
+| `systolic_gemm` | Parameterized signed N x N output-stationary GEMM with registered neighbor-to-neighbor operand movement | N=4 directed regression and default N=16 all-output smoke test | Standalone; no DMA, convolution lowering, bias, or requantization |
+| `signed_int8_conv3x3` | One-channel signed 3x3 cropped CNN cross-correlation with bias, framing, and ready/valid backpressure | Two-frame self-checking RTL test | Standalone; not connected to the HLS datapath |
+| `dcse_apb3_ctrl` | Zero-wait APB3 configuration/status registers, job command, sticky completion/error, counters, and IRQ | 167-check RTL test | Generic control boundary; **not a VEGA hookup or AXI/APB bridge** |
+| `dcse_apb_systolic_demo` | Connects APB start/busy/done/IRQ to `systolic_gemm`; matrices/results remain direct packed ports | Two APB-launched N=4 signed GEMMs and 112 integration checks | Narrow control demo; programmed addresses are retained but not consumed |
+| Portable C register driver | Programs five 64-bit addresses, a layer index, start/status, and interrupts through a symbolic base | Strict host build and 66-check mock-MMIO test | Register-contract driver; no board address, cache policy, PLIC, or hardware fence |
+| Xilinx 7-series structural mapping | Maps the three new leaf RTL blocks to Xilinx 7-series primitives | Reproducible Yosys scripts and recorded cell counts | No placement, routing, timing, power, or board result |
 
-| Capability | Status | Evidence |
-| --- | --- | --- |
-| INT8 channel projection, 16 output channels | Implemented | [`src/dcse_top.cpp`](src/dcse_top.cpp) |
-| INT32 accumulation with INT16 bias | Implemented | HLS source and boundary tests |
-| Optional identity-residual primitive | Implemented | C simulation includes 7- and 31-channel residual cases |
-| Deterministic zero-output response for selected invalid configuration fields | Implemented | Directed tests cover layer index, channel count, and mode |
-| Standalone 16-input x 16-output SystemVerilog MAC primitive | Implemented | Self-checking ready/valid testbench covers 48 accumulations, stalls, back-to-back traffic, and reset |
-| AXI4 memory ports and AXI4-Lite control | Described by HLS interface pragmas | Generated RTL must be inspected after HLS synthesis |
-| Genesys 2 Kintex-7 target, 150 MHz constraint | Configured | [`run_hls.tcl`](run_hls.tcl); timing closure is not yet claimed |
-| Dependency-free executable reference model | Implemented | `make model-test` |
-| Spatial 3x3 convolution | **Not implemented** | Descriptor value exists, but the current datapath is pointwise |
-| VEGA processor, APB bridge, DMA, or CDC integration | **Not implemented here** | Integration boundary and roadmap are documented below |
-| Board-measured end-to-end detector performance | **Not measured** | Requires packaged IP, SoC integration, and repeatable board tests |
+This is **not a complete object detector**. It does not contain an integrated
+YOLO graph, trained weights, activation/requantization stages, detection head,
+non-maximum suppression, tensor DMA, processor/accelerator interconnect, or a
+validated board application.
 
-The MAC implementation is a **parallel dot-product tile**, not a systolic
-array. Inputs and weights do not propagate between processing elements in the
-current design.
+### Development chronology
+
+The systolic GEMM, signed 3x3 convolution, APB3 control block, APB-to-systolic
+demo, portable driver, Xilinx 7-series mapping flow, and HLS datapath refactor
+were added on **2026-08-15**, after the CV and application snapshot that
+preceded this work. They are current, post-CV work and should not be used to
+imply that those exact artifacts existed when earlier application material was
+submitted. Git history preserves that chronology.
 
 ## Architecture at a glance
 
 ```text
-software: start, layer_idx, base addresses       external memory
-          |                             input / weights / bias
-          |                                  + descriptor table
-          v                                           |
-   AXI4-Lite control                           AXI4 reads: gmem0..3
-  +----------------+       +--------------------------v-----+
-  | control + bases|------>| 16-output-channel INT8 MAC tile|
-  +----------------+       +---------------+----------------+
-                                             |
-                        +--------------------+------------------+
-                        |                                       |
-                 non-residual mode                identity-residual mode
-                        |                            identity-bank add
-                        +--------------------+------------------+
-                                             |
-                                gmem4 writes to output memory
+existing HLS path (pointwise only)
+
+buffer addresses + layer index              external memory
+             |                      input / weights / bias / descriptor
+             v                                     |
+      HLS AXI4-Lite control                 five HLS AXI4 masters
+             |                                     |
+             +----------> dcse_top <---------------+
+                              |
+                    pointwise / residual output
+
+
+RTL research blocks
+
+ direct packed A/B -----------+       APB3 control
+                              |            |
+                              v            v
+                    +--------------------------------+
+                    | dcse_apb_systolic_demo         |
+                    | ctrl --start--> systolic_gemm  |
+                    | ctrl <--done--- systolic_gemm  |
+                    +--------------------------------+
+                              |            |
+                       direct packed C     irq
+
+ raster pixels -> signed_int8_conv3x3 -> cropped 3x3 accumulation
+
+ int8_mac_tile_16x16 remains a separate non-systolic parallel MAC slice
+
+ APB buffer addresses are stored/readable but unused by the demo datapath
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for tensor layouts, the
-descriptor format, interface ownership, design trade-offs, and the staged
-processor-integration plan.
+The HLS mode named `SPATIAL3x3_RESERVED` still executes the pointwise HLS
+datapath. The new RTL 3x3 block is a real spatial primitive, but no wrapper
+currently substitutes it into `dcse_top`. Similarly, the true systolic GEMM is
+separate from both the HLS kernel and the older parallel MAC tile. The demo
+connects only its APB job handshake: it does not fetch matrices through the
+programmed address registers.
+
+See [architecture notes](docs/architecture.md), the
+[verification matrix](docs/verification_matrix.md), and the
+[VEGA integration boundary](docs/vega_integration.md) for the precise
+interfaces and remaining system work. The
+[design-review walkthrough](docs/review_walkthrough.md) provides a short path
+from each statement to its source and test evidence.
 
 ## Reproduce the checks
 
-The full local check runs the dependency-free Python model tests and the
-self-checking SystemVerilog testbench (Icarus Verilog is required for RTL):
+The portable regression requires Python 3, a C11 compiler, Icarus Verilog, and
+`vvp`:
 
 ```bash
 make test
 ```
 
-To run the checked HLS C simulation with Vitis HLS on `PATH`:
+It runs the Python model, all RTL testbenches, and the host-side C
+driver test. Individual targets include `model-test`, `rtl-mac-test`,
+`rtl-systolic-test`, `rtl-systolic-n16-test`, `rtl-convolution-test`,
+`rtl-apb-test`, `rtl-apb-systolic-demo-test`, and `software-test`.
+
+For reproducible structural mapping with Yosys:
+
+```bash
+make synth-xc7
+```
+
+The scripts use `synth_xilinx -family xc7 -noiopad`. The result is useful for
+checking primitive inference and architecture scale, but it is not exact
+Genesys 2 utilization or timing. See
+[Genesys 2 mapping notes](docs/genesys2_mapping.md).
+
+To run the HLS C simulation with Vitis HLS on `PATH`:
 
 ```bash
 make hls-csim
 ```
 
-To request C simulation followed by synthesis:
+To request C simulation followed by HLS synthesis:
 
 ```bash
 make hls
 ```
 
-Review
-`dcse_hls_project/solution1/syn/report/dcse_top_csynth.rpt` for achieved clock,
-latency, initiation interval, and resources. The repository deliberately does
-not copy aspirational numbers into this README. Vitis HLS 2025.2 is the only
-version exercised for the current source state.
+If synthesis completes, review
+`dcse_hls_project/solution1/syn/report/dcse_top_csynth.rpt` rather than inferring
+latency, initiation interval, or resource use from source pragmas.
 
-### Current local result
+The post-CV HLS refactor removed full-tile identity/result intermediates by
+folding optional residual addition into the shared pointwise MAC and writing
+the final value directly. C simulation remained unchanged. In comparable
+bounded compiler diagnostics, the performance-stage IR count fell from 93,503
+to 45,929: 47,574 fewer, or 50.9%. The `Array/Struct` step-5 count fell from
+126,851 to 62,381. These are **compiler-scale observations**, not synthesized
+resource, II, latency, or timing results; hardware transformation still did not
+finish and no `csynth` report exists.
 
-- 10/10 portable Python tests passed.
-- The standalone RTL test passed 3 vectors, 48 output accumulations,
-  back-to-back traffic, a four-cycle stall, and asynchronous reset.
-- Vitis HLS 2025.2 C simulation passed all six valid arithmetic cases and four
-  invalid-configuration cases.
-- A bounded local C-synthesis attempt was stopped before completion, so this
-  revision makes no latency, II, utilization, or timing-closure claim.
+### Evidence snapshot: 2026-08-15
 
-The exact commands and result boundary are recorded in
-[`docs/local_results.md`](docs/local_results.md).
+- Portable Python model: **10/10 tests passed**.
+- HLS C simulation: six valid arithmetic cases and four invalid-configuration
+  cases passed after the fused-residual/direct-write refactor; every
+  4,096-element output tile was checked.
+- Parallel MAC RTL: three vectors and **48 output accumulations** passed,
+  including back-to-back traffic, a four-cycle stall, and reset.
+- Systolic RTL: three N=4 cases checked 48 outputs with exact 10-cycle active
+  latency; the default N=16 case checked all **256 outputs in 46 active
+  cycles**.
+- 3x3 RTL: **84 signed pixels produced 40 checked cropped outputs** across two
+  7 x 6 frames, with two kernels, signed extremes, bias, bubbles,
+  backpressure, and framing.
+- APB3 RTL: **167 checks passed**.
+- APB-to-systolic demo: **112 checks passed** across two APB-launched signed
+  N=4 GEMMs. Timing was checked at all boundaries: 10 clocks from raw GEMM busy
+  to raw done, 11 from the accepted APB `CONTROL` access to raw done, and 12
+  from that access to sticky done/IRQ. Busy-start rejection, input capture,
+  status, counters, W1C, and restart were also checked.
+- Portable driver: strict C11 compilation and **66 mock-MMIO checks passed**.
 
-## Verification coverage
-
-The HLS C testbench uses deterministic randomized tensors and checks every
-output value for:
-
-- pointwise projection with 1, 7, and 256 input channels;
-- the currently compatible behavior of the 3x3 mode identifier;
-- identity-residual mode at 7 and 31 channels, including outputs that have no
-  matching identity channel.
-- invalid zero/oversized channel counts, an unknown mode, and an out-of-range
-  layer-table index, all of which must produce an all-zero output.
-
-The portable Python tests independently cover descriptor packing, signed INT8
-range enforcement, projection arithmetic, residual boundaries, and all channel
-counts used by the HLS testbench. The standalone RTL test checks three vectors,
-48 output accumulations, back-to-back transfers, a four-cycle downstream stall,
-and reset. CI runs both suites on every push and pull request.
+The exact command/result boundary is recorded in
+[local results](docs/local_results.md).
 
 ## Processor integration contract
 
-The intended processor/accelerator split is:
+The generic APB3 block makes the proposed software-visible control state
+executable: five buffer addresses, layer index, start, busy/done/error status,
+interrupt enables/causes, and job counters. The portable C API exercises that
+same relative register map.
 
-- software validates and packs layer descriptors, allocates contiguous tensor
-  buffers, and sequences accelerator jobs;
-- the accelerator reads tensors/descriptors through `gmem0` through `gmem3`,
-  writes results through `gmem4`, and exposes start/status control through the
-  AXI4-Lite block generated by HLS;
-- a future VEGA-based system must add an SoC-specific interconnect or bridge,
-  address map, cache-coherency policy, interrupt handling, and CDC analysis.
+`dcse_apb_systolic_demo` proves a small part of that contract end to end: an
+APB start launches the systolic core and completion is visible through status,
+counters, and IRQ. A and B still enter as direct packed top-level ports, C
+leaves the same way, and the APB buffer addresses are not consumed.
 
-No APB, DMA, CDC, or complete VEGA integration is claimed by this repository.
-The [VEGA ET1031 documentation](https://cdac-vega.gitlab.io/socoverview/microprocessors.html)
-is the external processor reference; access to an actual SoC integration tree
-and its memory map is a prerequisite for that phase.
+It does not select a VEGA physical base address or connect to a VEGA
+interconnect. Public VEGA ET1031/AT1051 material describes configurable AXI4 or
+AHB interfaces, so an actual build must inspect the selected SoC tree and then
+either connect the generated HLS AXI4-Lite control interface directly or add a
+verified platform-specific bridge/wrapper. Tensor traffic must remain on a
+high-bandwidth memory path, not APB.
+
+Still required are a concrete address decoder, generated HLS register-map
+cross-check, memory arbitration, cache/coherency rules, PLIC assignment,
+clock-domain/reset analysis, DMA or equivalent data movement, fault handling,
+and software-to-board verification. Until those exist, the defensible status
+is: **APB3 control peripheral and portable register driver implemented and
+simulation-checked; VEGA system integration remains future work.**
 
 ## Project provenance
 
 This repository began as a team/DVCon submission snapshot. Git history
 preserves the original Stage 2A import under the contributor identity
 `codingNR29`; repository ownership alone should not be read as sole authorship
-of that material. The root contest archives, notebooks, and media are preserved
-historical/team artifacts and are not evidence for the accelerator path
+of that material. Root contest archives, notebooks, and media are preserved
+historical/team artifacts and are not evidence for the accelerator paths
 documented here.
 
-The team contribution split is:
+The recorded team contribution split is:
 
 - **Ahesh Dilhan:** primary hardware lead—hardware architecture, hardware
   design and planning, accelerator analysis, and hardware verification.
 - **Cubing and Kavija:** machine-learning work.
 
-The source-first RTL slice, portable model/tests, verification matrix, and
-documentation are a later hardware-side repository-hardening layer led by
-Ahesh. History has not been rewritten to obscure the distinction. See
-[`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the concise contribution record.
+The HLS datapath refactor, source-first RTL slices, portable model/tests,
+verification matrix, and documentation are a later hardware-side hardening
+layer led by Ahesh. History has not been rewritten to obscure the distinction.
+See
+[`CONTRIBUTORS.md`](CONTRIBUTORS.md).
 
 ## Next milestones
 
-1. Implement a line/window buffer and use nine weight positions for true 3x3
-   spatial convolution.
-2. Export the HLS IP, archive the generated reports, and test AXI behavior under
-   backpressure.
-3. Build the processor-side driver against a concrete SoC address map; add
-   negative tests for invalid descriptors and addresses.
-4. Measure board latency, throughput, utilization, power, and software overhead
-   with a versioned bitstream and test vector set.
-
-This staged plan keeps the project useful today while making the remaining
-research questions explicit and falsifiable.
+1. Define a wrapper-level dataflow and prove the standalone arithmetic blocks
+   against shared software vectors before connecting them to HLS or memory.
+2. Generate/package the HLS IP, archive its exact AXI register map and reports,
+   and test AXI behavior under randomized stalls and error responses.
+3. Obtain the exact VEGA contest/integration tree, choose the real AXI/AHB/APB
+   boundary, and implement the address, cache, interrupt, reset, and CDC plan.
+4. Complete licensed implementation for `xc7k325tffg900-2`, then report timing,
+   routed utilization, power, and repeatable board measurements from archived
+   artifacts.
+5. Add the missing detector-level stages and compare end-to-end accuracy and
+   transfer-inclusive latency against a versioned software oracle.
 
 ## License
 
