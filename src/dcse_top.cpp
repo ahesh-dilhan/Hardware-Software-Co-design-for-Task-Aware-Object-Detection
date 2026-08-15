@@ -1,21 +1,22 @@
 #include "dcse_top.h"
 
-// Bank C for RAP (Residual Accumulation Path) - holds identity tensor during CSP blocks
+// Bank C holds the identity tensor for the optional residual primitive.
 static int8_t_hw bank_c[BANK_C_DEPTH];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MCP: 16×16 output-stationary systolic array (INT8 MAC, bias pre-added)
+// Sixteen-output-channel MAC tile (INT8 products, INT32 accumulation).
+// This is a parallel dot-product engine, not a systolic array: values do not
+// move between processing elements.
 // ─────────────────────────────────────────────────────────────────────────────
-static void mcp_systolic(
+static void parallel_mac_tile(
     int8_t_hw  in  [TILE_H][TILE_W][MAX_CHANNELS],
-    int8_t_hw  w   [MCP_SIZE][MCP_SIZE][MAX_CHANNELS],
+    int8_t_hw  w   [MCP_SIZE][MAX_CHANNELS],
     int16_t_hw bias[MCP_SIZE],
     int32_t_hw out [TILE_H][TILE_W][MCP_SIZE],
     int in_ch)
 {
 #pragma HLS INLINE off
 #pragma HLS ARRAY_PARTITION variable=w    complete dim=1
-#pragma HLS ARRAY_PARTITION variable=w    complete dim=2
 #pragma HLS ARRAY_PARTITION variable=out  complete dim=3
 #pragma HLS ARRAY_PARTITION variable=bias complete dim=1
 
@@ -23,12 +24,12 @@ static void mcp_systolic(
         COLS: for (int c = 0; c < TILE_W; c++) {
 #pragma HLS PIPELINE II=1
             OC: for (int oc = 0; oc < MCP_SIZE; oc++) {
-                // BN-bias packed into pre-adder stage (N2 novelty)
+                // Bias initializes the accumulator before channel reduction.
                 int32_t_hw acc = (int32_t_hw)bias[oc];
                 IC: for (int ic = 0; ic < MAX_CHANNELS; ic++) {
 #pragma HLS UNROLL factor=16
                     if (ic < in_ch)
-                        acc += (int32_t_hw)in[r][c][ic] * (int32_t_hw)w[oc][0][ic];
+                        acc += (int32_t_hw)in[r][c][ic] * (int32_t_hw)w[oc][ic];
                 }
                 out[r][c][oc] = acc;
             }
@@ -37,7 +38,7 @@ static void mcp_systolic(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RAP: Write input tile into Bank C simultaneously with MCP feed (CSP identity)
+// Residual store: copy the input identity tensor into Bank C.
 // ─────────────────────────────────────────────────────────────────────────────
 static void rap_store(
     int8_t_hw in[TILE_H][TILE_W][MAX_CHANNELS],
@@ -57,9 +58,9 @@ static void rap_store(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Adder tree: MCP output + RAP identity → zero stall cycles (N1 novelty)
+// Residual add: MAC output plus the stored identity when a channel exists.
 // ─────────────────────────────────────────────────────────────────────────────
-static void adder_tree(
+static void residual_add(
     int32_t_hw mcp_out[TILE_H][TILE_W][MCP_SIZE],
     int32_t_hw out    [TILE_H][TILE_W][MCP_SIZE],
     int in_ch)
@@ -81,9 +82,9 @@ static void adder_tree(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CONV path (no residual addition)
+// Direct output path (no residual addition).
 // ─────────────────────────────────────────────────────────────────────────────
-static void conv_path(
+static void direct_store(
     int32_t_hw mcp_out[TILE_H][TILE_W][MCP_SIZE],
     int32_t_hw out    [TILE_H][TILE_W][MCP_SIZE])
 {
@@ -99,46 +100,75 @@ static void conv_path(
     }
 }
 
+// Deterministic response for an invalid descriptor or layer-table index.
+static void clear_output(
+    int32_t_hw out[TILE_H][TILE_W][MCP_SIZE])
+{
+#pragma HLS INLINE off
+
+    for (int r = 0; r < TILE_H; r++) {
+        for (int c = 0; c < TILE_W; c++) {
+#pragma HLS PIPELINE II=1
+            for (int oc = 0; oc < MCP_SIZE; oc++) {
+                out[r][c][oc] = 0;
+            }
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// TOP-LEVEL: Mode Decoder + Tile ROM + DCSE dataflow
+// TOP-LEVEL: mode decoder + caller-provided external descriptor table
 // ─────────────────────────────────────────────────────────────────────────────
 void dcse_top(
     int8_t_hw  input_tile [TILE_H][TILE_W][MAX_CHANNELS],
-    int8_t_hw  weights    [MCP_SIZE][MCP_SIZE][MAX_CHANNELS],
+    int8_t_hw  weights    [MCP_SIZE][MAX_CHANNELS],
     int16_t_hw bn_bias    [MCP_SIZE],
     tile_cfg_t tile_rom   [35],
     ap_uint<6> layer_idx,
     int32_t_hw output_tile[TILE_H][TILE_W][MCP_SIZE])
 {
 #pragma HLS INTERFACE m_axi     port=input_tile  depth=65536  offset=slave bundle=gmem0
-#pragma HLS INTERFACE m_axi     port=weights     depth=65536  offset=slave bundle=gmem1
+#pragma HLS INTERFACE m_axi     port=weights     depth=4096   offset=slave bundle=gmem1
 #pragma HLS INTERFACE m_axi     port=bn_bias     depth=16     offset=slave bundle=gmem2
 #pragma HLS INTERFACE m_axi     port=tile_rom    depth=35     offset=slave bundle=gmem3
-#pragma HLS INTERFACE m_axi     port=output_tile depth=65536  offset=slave bundle=gmem4
+#pragma HLS INTERFACE m_axi     port=output_tile depth=4096   offset=slave bundle=gmem4
 #pragma HLS INTERFACE s_axilite port=layer_idx
 #pragma HLS INTERFACE s_axilite port=return
 
-#pragma HLS RESOURCE variable=bank_c core=RAM_2P_BRAM
+    // Validate the table index before any external-memory access.
+    if (layer_idx >= 35) {
+        clear_output(output_tile);
+        return;
+    }
 
-    // N3: Read tile config from ROM in ONE clock cycle — zero runtime arithmetic
+    // The caller supplies a pre-packed layer descriptor table in external memory.
     tile_cfg_t cfg    = tile_rom[layer_idx];
     ap_uint<16> layer_type = cfg(15, 0);
     int in_ch = (int)cfg(47, 32);
 
-    // Internal MCP output buffer
-    static int32_t_hw mcp_out[TILE_H][TILE_W][MCP_SIZE];
-#pragma HLS ARRAY_PARTITION variable=mcp_out complete dim=3
+    bool valid_input_channels = in_ch >= 1 && in_ch <= MAX_CHANNELS;
+    bool valid_layer_type =
+        layer_type == SPATIAL3x3_RESERVED ||
+        layer_type == POINTWISE_PROJECTION ||
+        layer_type == IDENTITY_RESIDUAL;
+    if (!valid_input_channels || !valid_layer_type) {
+        clear_output(output_tile);
+        return;
+    }
+
+    // Internal MAC output buffer
+    static int32_t_hw mac_out[TILE_H][TILE_W][MCP_SIZE];
+#pragma HLS ARRAY_PARTITION variable=mac_out complete dim=3
 
     // Mode Decoder: routes data based on layer type
-    if (layer_type == CSP_BLOCK) {
-        // RAP stores identity simultaneously with MCP execution (N1 novelty)
-#pragma HLS DATAFLOW
+    if (layer_type == IDENTITY_RESIDUAL) {
         rap_store(input_tile, in_ch);
-        mcp_systolic(input_tile, weights, bn_bias, mcp_out, in_ch);
-        adder_tree(mcp_out, output_tile, in_ch);
+        parallel_mac_tile(input_tile, weights, bn_bias, mac_out, in_ch);
+        residual_add(mac_out, output_tile, in_ch);
     } else {
-        // CONV3x3 or CONV1x1 — no residual
-        mcp_systolic(input_tile, weights, bn_bias, mcp_out, in_ch);
-        conv_path(mcp_out, output_tile);
+        // Both non-residual IDs currently run a pointwise channel projection.
+        // Spatial 3x3 windowing is an explicitly documented extension.
+        parallel_mac_tile(input_tile, weights, bn_bias, mac_out, in_ch);
+        direct_store(mac_out, output_tile);
     }
 }
