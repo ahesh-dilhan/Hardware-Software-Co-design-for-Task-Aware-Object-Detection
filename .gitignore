@@ -1,5 +1,6 @@
 # HLS generated outputs
 dcse_top/dcse_top/
+dcse_hls_project/
 *.log
 *.jou
 *.pb
@@ -7,3 +8,10 @@ dcse_top/dcse_top/
 .Xil/
 _ide/
 *.ip_user_files/
+
+# Python reference-model cache
+__pycache__/
+*.pyc
+
+# Local RTL simulation output
+build/
