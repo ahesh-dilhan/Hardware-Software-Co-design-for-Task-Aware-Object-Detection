@@ -1,0 +1,6 @@
+read_verilog -sv -DSYNTHESIS rtl/integration/dcse_apb3_ctrl.sv
+hierarchy -check -top dcse_apb3_ctrl
+synth_xilinx -family xc7 -noiopad -top dcse_apb3_ctrl
+check
+tee -o build/yosys/apb3_ctrl_stat.txt stat -tech xilinx
+tee -o build/yosys/apb3_ctrl_stat.json stat -json
