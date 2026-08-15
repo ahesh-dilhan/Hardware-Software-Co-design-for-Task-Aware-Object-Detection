@@ -164,12 +164,22 @@ HLS_CSIM_ONLY=1 vitis-run --mode hls --tcl run_hls.tcl
 ```
 
 Result: **C simulation completed with 0 errors**. Six valid arithmetic cases
-and four invalid-configuration cases passed. The scoreboard checked all 4,096
-outputs for every valid tile.
+and four invalid-configuration cases passed after the residual path was fused
+into the shared MAC and the final value was written directly. The scoreboard
+checked all 4,096 outputs for every valid tile.
 
-A bounded HLS C-synthesis attempt was stopped during compilation after the
-source expanded into a large intermediate representation. It produced no
-`csynth` report. Therefore there is no HLS claim for achieved II, latency,
+Two comparable, bounded Vitis compiler runs record the source-level effect of
+that refactor:
+
+| Compiler diagnostic | Before | Fused/direct-write source |
+| --- | ---: | ---: |
+| Performance-stage IR instructions | 93,503 | 45,929 |
+| `Array/Struct` step-5 instructions | 126,851 | 62,381 |
+
+The performance-stage count fell by 47,574, or **50.9%**. Hardware
+transformation still did not finish within the bounded run, and no `csynth`
+report was produced. These counts demonstrate lower compiler-scale
+intermediate complexity only; there is no HLS claim for achieved II, latency,
 resources, AXI throughput, or timing.
 
 ## Open-source Xilinx 7-series mapping

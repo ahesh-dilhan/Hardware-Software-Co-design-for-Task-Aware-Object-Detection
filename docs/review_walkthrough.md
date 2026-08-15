@@ -50,10 +50,18 @@ Verify these facts:
   channels;
 - the output has 16 channels and uses INT32 accumulation;
 - identity residual is conditional on output-channel availability;
+- the current post-CV source fuses that optional residual into the shared MAC
+  and writes the final output directly instead of materializing identity and
+  result tiles;
 - the descriptor mode named `SPATIAL3x3_RESERVED` does not select nine spatial
   taps; and
 - AXI pragmas request interfaces, but generated-RTL behavior and synthesis
   metrics require generated reports.
+
+The fused source passes the same six valid and four invalid HLS CSim cases.
+Its bounded performance-stage compiler IR fell from 93,503 to 45,929 (50.9%).
+That is a source/compiler-complexity result only: hardware transformation did
+not finish, so there is still no HLS II, latency, resource, or timing report.
 
 Then open [`rtl/int8_mac_tile_16x16.sv`](../rtl/int8_mac_tile_16x16.sv). It is a
 parallel 16-input-by-16-output dot-product slice with ready/valid output, not a

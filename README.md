@@ -20,7 +20,7 @@ integration.
 
 | Artifact | Implemented behavior | Current evidence | Integration status |
 | --- | --- | --- | --- |
-| HLS kernel | Signed INT8 pointwise channel projection, 16 outputs, INT32 accumulation, INT16 bias, optional identity residual | Python model and Vitis HLS 2025.2 C simulation | Independent kernel; generated RTL is not committed |
+| HLS kernel | Signed INT8 pointwise channel projection, 16 outputs, INT32 accumulation, INT16 bias, optional fused identity residual, and direct output write | Python model, Vitis HLS 2025.2 C simulation, and bounded compiler-scale comparison | Independent kernel; hardware transformation did not finish and generated RTL is not committed |
 | `int8_mac_tile_16x16` | One 16-input x 16-output parallel dot-product transaction with bias/residual and an elastic output | Self-checking RTL simulation | Standalone; **not systolic** and not equivalent to the full HLS kernel |
 | `systolic_gemm` | Parameterized signed N x N output-stationary GEMM with registered neighbor-to-neighbor operand movement | N=4 directed regression and default N=16 all-output smoke test | Standalone; no DMA, convolution lowering, bias, or requantization |
 | `signed_int8_conv3x3` | One-channel signed 3x3 cropped CNN cross-correlation with bias, framing, and ready/valid backpressure | Two-frame self-checking RTL test | Standalone; not connected to the HLS datapath |
@@ -37,11 +37,11 @@ validated board application.
 ### Development chronology
 
 The systolic GEMM, signed 3x3 convolution, APB3 control block, APB-to-systolic
-demo, portable driver, and Xilinx 7-series mapping flow were added on
-**2026-08-15**, after the CV and application snapshot that preceded this work.
-They are current, post-CV prototypes and should not be used to imply that those
-exact artifacts existed when earlier application material was submitted. Git
-history preserves that chronology.
+demo, portable driver, Xilinx 7-series mapping flow, and HLS datapath refactor
+were added on **2026-08-15**, after the CV and application snapshot that
+preceded this work. They are current, post-CV work and should not be used to
+imply that those exact artifacts existed when earlier application material was
+submitted. Git history preserves that chronology.
 
 ## Architecture at a glance
 
@@ -133,11 +133,21 @@ If synthesis completes, review
 `dcse_hls_project/solution1/syn/report/dcse_top_csynth.rpt` rather than inferring
 latency, initiation interval, or resource use from source pragmas.
 
+The post-CV HLS refactor removed full-tile identity/result intermediates by
+folding optional residual addition into the shared pointwise MAC and writing
+the final value directly. C simulation remained unchanged. In comparable
+bounded compiler diagnostics, the performance-stage IR count fell from 93,503
+to 45,929: 47,574 fewer, or 50.9%. The `Array/Struct` step-5 count fell from
+126,851 to 62,381. These are **compiler-scale observations**, not synthesized
+resource, II, latency, or timing results; hardware transformation still did not
+finish and no `csynth` report exists.
+
 ### Evidence snapshot: 2026-08-15
 
 - Portable Python model: **10/10 tests passed**.
 - HLS C simulation: six valid arithmetic cases and four invalid-configuration
-  cases passed; every 4,096-element output tile was checked.
+  cases passed after the fused-residual/direct-write refactor; every
+  4,096-element output tile was checked.
 - Parallel MAC RTL: three vectors and **48 output accumulations** passed,
   including back-to-back traffic, a four-cycle stall, and reset.
 - Systolic RTL: three N=4 cases checked 48 outputs with exact 10-cycle active
@@ -198,9 +208,10 @@ The recorded team contribution split is:
   design and planning, accelerator analysis, and hardware verification.
 - **Cubing and Kavija:** machine-learning work.
 
-The source-first RTL slices, portable model/tests, verification matrix, and
-documentation are a later hardware-side hardening layer led by Ahesh. History
-has not been rewritten to obscure the distinction. See
+The HLS datapath refactor, source-first RTL slices, portable model/tests,
+verification matrix, and documentation are a later hardware-side hardening
+layer led by Ahesh. History has not been rewritten to obscure the distinction.
+See
 [`CONTRIBUTORS.md`](CONTRIBUTORS.md).
 
 ## Next milestones

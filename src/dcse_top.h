@@ -9,7 +9,6 @@ typedef ap_uint<64> tile_cfg_t;
 #define TILE_H       16
 #define TILE_W       16
 #define MAX_CHANNELS 256
-#define BANK_C_DEPTH (16*16*256)
 #define SPATIAL3x3_RESERVED 0
 #define POINTWISE_PROJECTION 1
 #define IDENTITY_RESIDUAL 2

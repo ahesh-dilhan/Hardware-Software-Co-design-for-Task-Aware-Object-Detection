@@ -13,9 +13,9 @@ Status meanings:
 - **gap** — no executable evidence for the stated system requirement is
   published.
 
-The systolic, convolution, APB3, APB-to-systolic demo, driver, and mapping
-additions are dated **2026-08-15** and post-date the preceding CV/application
-snapshot.
+The HLS residual-path refactor, systolic, convolution, APB3,
+APB-to-systolic demo, driver, and mapping additions are dated **2026-08-15**
+and post-date the preceding CV/application snapshot.
 
 | Requirement or invariant | Current evidence | Status | Remaining gap / acceptance criterion |
 | --- | --- | ---: | --- |
@@ -23,6 +23,7 @@ snapshot.
 | The software descriptor contract accepts 16 outputs, 1..256 inputs, and only documented HLS mode IDs. | Python positive/negative descriptor tests include zero/257 channels, unsupported output width, and an unknown mode. | **checked** | Define and enforce the reserved kernel-size/output-channel field policy in hardware. |
 | HLS pointwise arithmetic is signed INT8 x INT8, INT16-biased, and accumulated/stored as INT32. | Known Python dot product; Vitis HLS 2025.2 C simulation passed deterministic C golden-loop comparisons. | **checked** | Cross-feed shared vectors and run HLS C/RTL co-simulation. |
 | HLS identity residual is added only when `oc < input_channels`. | Python residual-boundary test and HLS C cases at 7 and 31 channels. | **checked** | Co-simulate generated HLS RTL and verify any future RTL wrapper's sign/width contract. |
+| Fusing the HLS residual and direct output preserves current C behavior while reducing compiler IR. | All six valid and four invalid CSim cases still pass; performance-stage IR fell from 93,503 to 45,929 (50.9%), and `Array/Struct` step 5 fell from 126,851 to 62,381. | **partial** | Complete `csynth` and compare achieved II, latency, storage, DSP/LUT/FF/BRAM, and clock estimate. IR counts are not hardware-resource results. |
 | HLS arithmetic handles input-channel counts 1, 7, 16, 31, and 256. | Vitis HLS C simulation checked every one of 4,096 outputs for each directed case. | **checked** | Add shared signed-extreme/repeated-call vectors and C/RTL co-simulation. |
 | Invalid HLS table index, channel count, or mode produces deterministic zero output without an out-of-range descriptor read. | HLS C simulation passed 0, 257, type 99, and index 35 cases. | **checked** | Add generated-RTL tests, error status, ignored-field checks, and caller-address validation. |
 | HLS mode ID 0 does not masquerade as implemented spatial 3x3 convolution. | Source names it `SPATIAL3x3_RESERVED`; HLS tests and docs identify its current pointwise behavior. | **partial** | Reject the reserved ID in HLS or connect and prove a true spatial implementation. The standalone new RTL 3x3 block does not change HLS behavior. |

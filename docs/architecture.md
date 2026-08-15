@@ -14,6 +14,9 @@ architecture prototypes:
 - a generic APB3 control/status block with a portable C register driver; and
 - a narrow APB-to-systolic demo wrapper with direct packed matrix ports.
 
+The same dated, post-CV pass refactored the existing HLS pointwise path to fuse
+optional identity addition into its shared MAC loop and write results directly.
+
 The new blocks are executable evidence for those individual architectural
 ideas. They are not retroactive evidence, and they are not connected to the HLS
 kernel, a complete detector, or a VEGA system. The demo wrapper is the one
@@ -67,6 +70,43 @@ accumulated and stored as signed INT32. Sixteen output channels are generated
 for each position in a 16 x 16 tile. Source pragmas request MAC and pipeline
 parallelism, but only completed synthesis reports can establish the achieved
 structure, initiation interval, latency, or resource use.
+
+### Post-CV fused-residual/direct-write refactor
+
+The earlier source materialized two full-tile intermediate paths:
+
+- `rap_store` copied identity values into `bank_c`;
+- `parallel_mac_tile` wrote a complete `mac_out` tile; and
+- `residual_add` or `direct_store` traversed that tile again to produce the
+  external output.
+
+The current source passes `output_tile` and a `use_residual` flag into the one
+shared pointwise MAC. Each output-channel accumulator conditionally adds the
+matching signed input value and immediately writes its final INT32 result:
+
+```text
+bias + channel dot product + optional matching identity -> output_tile
+```
+
+This removes `bank_c`, `mac_out`, `rap_store`, `residual_add`, and
+`direct_store` from the source datapath. The invalid-configuration path still
+uses `clear_output`, and the arithmetic/interface contract is unchanged.
+Vitis HLS 2025.2 C simulation still passes the same six valid and four invalid
+cases with every valid output element compared.
+
+A bounded, approximately 20-minute C-synthesis attempt provides only
+**compiler-scale evidence**:
+
+| Vitis compiler diagnostic | Before refactor | After refactor |
+| --- | ---: | ---: |
+| Performance-stage IR count | 93,503 | 45,929 |
+| `Array/Struct` step-5 count | 126,851 | 62,381 |
+
+The first count fell by 47,574, or 50.9%. This demonstrates substantially less
+intermediate compiler work for this source/tool run. It does not establish
+fewer LUTs, FFs, DSPs, or BRAMs, a lower II, shorter hardware latency, improved
+Fmax, or timing closure. Hardware transformation still did not finish and no
+`csynth` report exists.
 
 ### HLS data layout
 
@@ -302,6 +342,8 @@ Passing evidence currently exists for:
 
 - HLS C arithmetic against a separate golden loop, including valid channel and
   residual boundaries plus selected invalid configurations;
+- preservation of all HLS C-simulation cases after the fused direct-write
+  refactor, plus a recorded reduction in bounded compiler IR counts;
 - dependency-free Python descriptor/arithmetic tests;
 - parallel MAC signed arithmetic and ready/valid behavior;
 - systolic wavefront timing, signed arithmetic, repeated jobs, busy-time start
@@ -325,6 +367,9 @@ or board performance. See the [verification matrix](verification_matrix.md).
   testable, but integration and data movement remain unsolved.
 - **Fixed 16-channel HLS output tile:** exposes useful parallelism while
   requiring software tiling for other output widths.
+- **Fused HLS residual/direct output:** removes redundant source-level tile
+  passes and sharply reduces recorded compiler IR, but only completed synthesis
+  can show its actual storage, schedule, resource, and timing consequences.
 - **Full N x N systolic tile ports:** make wavefront behavior easy to verify,
   but a practical system needs local memories/streaming and tile scheduling.
 - **Output-stationary GEMM:** keeps partial sums local and exposes 256 parallel
