@@ -145,12 +145,18 @@ preserves the original Stage 2A import under the contributor identity
 `codingNR29`; repository ownership alone should not be read as sole authorship
 of that material. The root contest archives, notebooks, and media are preserved
 historical/team artifacts and are not evidence for the accelerator path
-documented here. Any presentation of the project should name the team and state
-each person's exact contribution.
+documented here.
+
+The team contribution split is:
+
+- **Ahesh Dilhan:** primary hardware lead—hardware architecture, hardware
+  design and planning, accelerator analysis, and hardware verification.
+- **Cubing and Kavija:** machine-learning work.
 
 The source-first RTL slice, portable model/tests, verification matrix, and
-documentation are a later repository-hardening layer. History has not been
-rewritten to obscure the distinction.
+documentation are a later hardware-side repository-hardening layer led by
+Ahesh. History has not been rewritten to obscure the distinction. See
+[`CONTRIBUTORS.md`](CONTRIBUTORS.md) for the concise contribution record.
 
 ## Next milestones
 

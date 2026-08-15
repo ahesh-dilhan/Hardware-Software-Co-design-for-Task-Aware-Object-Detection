@@ -1,8 +1,8 @@
 License scope
 
 This MIT license applies to the newly authored repository-hardening material in
-`rtl/`, `sim/`, `model/`, `docs/`, `.github/`, `Makefile`, and the current
-`README.md`. The original team/contest/HLS snapshot, including `src/`, `tb/`,
+`rtl/`, `sim/`, `model/`, `docs/`, `.github/`, `Makefile`, `README.md`, and
+`CONTRIBUTORS.md`. The original team/contest/HLS snapshot, including `src/`, `tb/`,
 `Vivado_HLS_Me/`, archives, notebooks, datasets, and media, is excluded and
 retains any terms or notices attached to its original files.
 
